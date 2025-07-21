@@ -223,8 +223,8 @@ if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 if 'quiz_mode' not in st.session_state:
     st.session_state.quiz_mode = False
-if 'current_quiz' not in st.session_state:
-    st.session_state.current_quiz = None
+# Always reset current_quiz on app load to force new questions
+st.session_state.current_quiz = None
 if 'quiz_answers' not in st.session_state:
     st.session_state.quiz_answers = {}
 if 'current_question' not in st.session_state:
@@ -456,178 +456,109 @@ with col2:
             with quiz_container:
                 # st.markdown('<div class="quiz-fixed-container">', unsafe_allow_html=True)
                 
-                # Step 1: Concept Selection
-                if st.session_state.selected_concept is None:
-                    st.markdown('<div>🎯 Quiz Setup</div>', unsafe_allow_html=True)
-                    st.markdown('<div>Select a concept to quiz on:</div>', unsafe_allow_html=True)
-                    
-                    # Get available concepts
-                    stored_concepts = st.session_state.document_processor.get_concepts()
-                    if stored_concepts:
-                        # Create unique concept list (main concepts)
-                        unique_concepts = list(set([concept["main"] for concept in stored_concepts]))
-                        unique_concepts.sort()
-                        
-                        selected_concept_name = st.selectbox(
-                            "Choose a concept:",
-                            options=unique_concepts,
-                            key="concept_selector"
-                        )
-                        
-                        if st.button("Start Quiz", type="primary"):
-                            st.session_state.selected_concept = selected_concept_name
-                            st.rerun()
-                    else:
-                        st.warning("No concepts available. Upload some documents first!")
-                        if st.button("Cancel Quiz"):
-                            st.session_state.quiz_mode = False
-                            st.rerun()
-                
-                # Step 2: Quiz Questions
-                elif st.session_state.current_quiz is None:
-                    # Generate quiz questions for selected concept
-                    st.markdown(f'<div>🎯 Quiz on: {st.session_state.selected_concept}</div>', unsafe_allow_html=True)
-                    
-                    # Get mastery level for this concept
-                    stored_concepts = st.session_state.document_processor.get_concepts()
-                    concept_mastery = 0
-                    for concept in stored_concepts:
-                        if concept["main"] == st.session_state.selected_concept:
-                            concept_mastery = concept["mastery_level"]
-                            break
-                    
-                    # Convert mastery level to Bloom's Taxonomy name
-                    bloom_names = {1: "Recall", 2: "Understanding", 3: "Apply"}
-                    current_bloom = bloom_names.get(concept_mastery, "Unknown")
-                    next_bloom = bloom_names.get(concept_mastery + 1, "Unknown")
-                    
-                    st.markdown(f'<div>Current Level: {current_bloom} (Level {concept_mastery})</div>', unsafe_allow_html=True)
-                    # st.markdown(f'<div class="quiz-question">Next Level: {next_bloom}</div>', unsafe_allow_html=True)
-                    
-                    # Test button for debugging
-                    # # if st.button("Test Quiz Generation", type="secondary"):
-                    #     # Get chunks related to this concept
-                    #     documents = st.session_state.document_processor.get_documents()
-                    #     all_chunks = []
-                    #     for doc in documents:
-                    #         chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
-                    #         all_chunks.extend([chunk['text'] for chunk in chunks])
-                        
-                    #     if all_chunks and st.session_state.ollama_status:
-                    #         with st.spinner("Testing quiz generation..."):
-                    #             test_questions = st.session_state.llm_service.test_quiz_generation(
-                    #                 all_chunks, 
-                    #                 mastery_level=concept_mastery + 1,  # Next level
-                    #                 num_questions=1
-                    #             )
-                    #             st.write("Test questions generated:", test_questions)
-                    #     else:
-                    #         st.error("No documents available or Ollama not connected")
-                    
-                    if st.button("Generate Questions", type="primary"):
-                        # Get chunks related to this concept
-                        documents = st.session_state.document_processor.get_documents()
-                        all_chunks = []
-                        for doc in documents:
-                            chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
-                            all_chunks.extend([chunk['text'] for chunk in chunks])
-                        
-                        if all_chunks and st.session_state.ollama_status:
-                            with st.spinner("Generating quiz questions..."):
-                                questions = st.session_state.llm_service.generate_quiz_questions(
-                                    all_chunks, 
-                                    mastery_level=concept_mastery + 1,  # Next level
-                                    num_questions=3
-                                )
-                                if questions:
-                                    st.session_state.current_quiz = {
-                                        "title": f"Quiz on {st.session_state.selected_concept}",
-                                        "questions": questions,
-                                        "concept": st.session_state.selected_concept,
-                                        "mastery_level": concept_mastery
-                                    }
-                                    st.session_state.current_question = 0
-                                    st.session_state.quiz_answers = {}
-                                    st.session_state.quiz_feedback = None
-                                    st.rerun()
-                                else:
-                                    st.error("Failed to generate quiz questions")
+                # --- Quiz State Initialization ---
+                if 'current_question_data' not in st.session_state:
+                    st.session_state.current_question_data = None
+                if 'quiz_progress' not in st.session_state:
+                    st.session_state.quiz_progress = {'asked': 0, 'correct': 0}
+                if 'quiz_feedback' not in st.session_state:
+                    st.session_state.quiz_feedback = None
+                if 'quiz_just_started' not in st.session_state:
+                    st.session_state.quiz_just_started = False
+                if 'asked_questions' not in st.session_state:
+                    st.session_state.asked_questions = set()
+
+                # --- Quiz UI Logic ---
+                if st.session_state.quiz_mode:
+                    # Step 1: Concept Selection
+                    if st.session_state.selected_concept is None:
+                        st.markdown('<div>🎯 Quiz Setup</div>', unsafe_allow_html=True)
+                        st.markdown('<div>Select a concept to quiz on:</div>', unsafe_allow_html=True)
+                        stored_concepts = st.session_state.document_processor.get_concepts()
+                        if stored_concepts:
+                            unique_concepts = list(set([concept["main"] for concept in stored_concepts]))
+                            unique_concepts.sort()
+                            selected_concept_name = st.selectbox(
+                                "Choose a concept:",
+                                options=unique_concepts,
+                                key="concept_selector"
+                            )
+                            if st.button("Start Quiz", type="primary"):
+                                st.session_state.selected_concept = selected_concept_name
+                                st.session_state.current_question_data = None
+                                st.session_state.quiz_progress = {'asked': 0, 'correct': 0}
+                                st.session_state.quiz_feedback = None
+                                st.session_state.quiz_just_started = True
+                                st.session_state.asked_questions = set()
+                                st.rerun()
                         else:
-                            st.error("No documents available or Ollama not connected")
-                
-                # Step 3: Display Quiz Questions
-                elif st.session_state.current_quiz:
-                    st.markdown(f'<div class="quiz-question">{st.session_state.current_quiz["title"]}</div>', unsafe_allow_html=True)
-                    
-                    current_q = st.session_state.current_quiz["questions"][st.session_state.current_question]
-                    
-                    # Console output for current question
-                    print(f"\n=== QUESTION {st.session_state.current_question + 1} ===")
-                    print(f"Question: {current_q.get('question')}")
-                    print(f"Type: {current_q.get('type')}")
-                    print(f"Options: {current_q.get('options')}")
-                    print(f"Correct Index: {current_q.get('correct')}")
-                    print(f"Correct Answer: {current_q.get('correct_answer')}")
-                    print(f"Explanation: {current_q.get('explanation')}")
-                    print("=" * 50)
-                    
-                    st.markdown(f'<div class="quiz-question">Question {st.session_state.current_question + 1}: {current_q["question"]}</div>', unsafe_allow_html=True)
-                    
-                    # # Debug: Show question structure
-                    # st.write(f"Debug - Question type: {current_q.get('type')}")
-                    # st.write(f"Debug - Has options: {'options' in current_q}")
-                    # st.write(f"Debug - Options: {current_q.get('options', 'None')}")
-                    
-                    if current_q["type"] in ["multiple_choice", "recall"]:
-                        if "options" in current_q and len(current_q["options"]) > 0:
-                            # # Debug: Show correct answer info
-                            # st.write(f"Debug - Correct index: {current_q.get('correct')}")
-                            # st.write(f"Debug - Correct answer text: {current_q.get('correct_answer')}")
-                            # st.write(f"Debug - Options: {current_q.get('options')}")
-                            
-                            for i, option in enumerate(current_q["options"]):
-                                if st.button(f"{chr(65+i)}. {option}", key=f"quiz_option_{i}"):
-                                    st.session_state.quiz_answers[st.session_state.current_question] = i
-                                    correct_index = current_q.get("correct", 0)
-                                    is_correct = i == correct_index
-                                    print(f"ANSWER SELECTED:")
-                                    print(f"  Selected index: {i}")
-                                    print(f"  Selected option: {option}")
-                                    print(f"  Correct index: {correct_index}")
-                                    print(f"  Correct option: {current_q['options'][correct_index] if correct_index < len(current_q['options']) else 'Invalid'}")
-                                    print(f"  Is correct: {is_correct}")
-                                    st.write(f"Debug - Selected index: {i}, Correct index: {correct_index}, Is correct: {is_correct}")
-                                    st.session_state.quiz_feedback = is_correct
-                                    st.rerun()
-                        else:
-                            st.error("Multiple choice question missing options!")
-                            st.write("Question data:", current_q)
-                    
-                    # Display feedback
-                    if st.session_state.quiz_feedback is not None:
-                        if st.session_state.quiz_feedback:
-                            st.markdown('<div class="quiz-feedback correct">✅ Correct!</div>', unsafe_allow_html=True)
-                        else:
-                            st.markdown('<div class="quiz-feedback incorrect">❌ Incorrect!</div>', unsafe_allow_html=True)
-                        
-                        # Show Bloom's Taxonomy level
-                        # bloom_level = current_q.get("bloom_level", "Unknown")
-                        # st.markdown(f'<div class="quiz-feedback">Bloom\'s Level: {bloom_level}</div>', unsafe_allow_html=True)
-                        
-                        # Show explanation with fallback
-                        explanation = current_q.get("explanation", "No explanation available.")
-                        st.markdown(f'<div class="quiz-feedback">Explanation: {explanation}</div>', unsafe_allow_html=True)
-                        
-                        if st.button("Next Question"):
-                            st.session_state.current_question += 1
-                            st.session_state.quiz_feedback = None
-                            if st.session_state.current_question >= len(st.session_state.current_quiz["questions"]):
-                                # Quiz completed - update mastery
-                                _update_concept_mastery(st.session_state.current_quiz["concept"], st.session_state.quiz_answers)
+                            st.warning("No concepts available. Upload some documents first!")
+                            if st.button("Cancel Quiz"):
                                 st.session_state.quiz_mode = False
-                                st.session_state.current_quiz = None
-                                st.session_state.selected_concept = None
-                            st.rerun()
+                                st.rerun()
+                    else:
+                        # Step 2: Generate or Display Question
+                        if st.session_state.current_question_data is None:
+                            # Automatically generate a question if just started or after next
+                            if st.session_state.quiz_just_started or st.session_state.quiz_feedback is None:
+                                # Build the prompt with asked questions
+                                asked_list = list(st.session_state.asked_questions)
+                                if asked_list:
+                                    seen_section = "The user has already seen these questions:\n" + "\n".join(f"- {q}" for q in asked_list) + "\nPlease generate a new question that is not too similar to any of the above."
+                                else:
+                                    seen_section = ""
+                                with st.spinner("Generating question..."):
+                                    questions = st.session_state.llm_service.generate_quiz_questions(
+                                        [f"Concept: {st.session_state.selected_concept}\n{seen_section}"],
+                                        mastery_level=1,  # Or use actual mastery level if needed
+                                        num_questions=1
+                                    )
+                                    if questions:
+                                        st.session_state.current_question_data = questions[0]
+                                        st.session_state.quiz_feedback = None
+                                        st.session_state.quiz_progress['asked'] += 1
+                                        st.session_state.quiz_just_started = False
+                                        # Add the new question to asked_questions
+                                        st.session_state.asked_questions.add(questions[0].get('question', '').strip().lower())
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to generate a quiz question.")
+                        elif st.session_state.current_question_data is not None:
+                            current_q = st.session_state.current_question_data
+                            st.markdown(f'<div class="quiz-question">{current_q["question"]}</div>', unsafe_allow_html=True)
+                            for i, option in enumerate(current_q["options"]):
+                                if st.button(f"{option}", key=f"quiz_option_{i}"):
+                                    correct_answer = current_q.get("correct", "").strip().lower()
+                                    selected_answer = option.strip().lower()
+                                    is_correct = selected_answer == correct_answer
+                                    st.session_state.quiz_feedback = is_correct
+                                    if is_correct:
+                                        st.session_state.quiz_progress['correct'] += 1
+                                    st.session_state.quiz_progress['asked'] = max(1, st.session_state.quiz_progress['asked'])
+                                    st.session_state.quiz_answers = {st.session_state.quiz_progress['asked']: option}
+                                    st.rerun()
+                        # Show feedback if answered
+                        if st.session_state.quiz_feedback is not None:
+                            if st.session_state.quiz_feedback:
+                                st.markdown('<div class="quiz-feedback correct">✅ Correct!</div>', unsafe_allow_html=True)
+                            else:
+                                st.markdown('<div class="quiz-feedback incorrect">❌ Incorrect!</div>', unsafe_allow_html=True)
+                            explanation = current_q.get("explanation", "No explanation available.")
+                            st.markdown(f'<div class="quiz-feedback">Explanation: {explanation}</div>', unsafe_allow_html=True)
+                            st.markdown(f'<div class="quiz-feedback">Progress: {st.session_state.quiz_progress["correct"]} correct / {st.session_state.quiz_progress["asked"]} questions</div>', unsafe_allow_html=True)
+                            if st.button("Next Question", type="primary"):
+                                st.session_state.current_question_data = None
+                                st.session_state.quiz_feedback = None
+                                st.session_state.quiz_just_started = False
+                                st.rerun()
+                        # if st.button("End Quiz", type="secondary"):
+                        #     st.session_state.quiz_mode = False
+                        #     st.session_state.selected_concept = None
+                        #     st.session_state.current_question_data = None
+                        #     st.session_state.quiz_progress = {'asked': 0, 'correct': 0}
+                        #     st.session_state.quiz_feedback = None
+                        #     st.session_state.quiz_just_started = False
+                        #     st.rerun()
                 
                 # Fallback case
                 else:
@@ -679,7 +610,7 @@ with col2:
                         else:
                             ai_response = "I don't have any relevant information in your uploaded documents about your question. Try uploading some documents first!"
                     else:
-                        ai_response = "⚠️ Ollama is not running. Please start Ollama with a model (e.g., `ollama run gemma3:1b`) to enable AI responses."
+                        ai_response = "⚠️ Ollama is not running. Please start Ollama with a model (e.g., `ollama run gemma3:4b`) to enable AI responses."
                     
                     st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                     st.rerun()
@@ -769,7 +700,7 @@ with col3:
     
     # Ollama status indicator
     if st.session_state.ollama_status:
-        st.success("✅ Ollama Connected (Gemma3:1b)")
+        st.success("✅ Ollama Connected (Gemma3:4b)")
     else:
         st.error("❌ Ollama Not Connected")
-        st.info("Run `ollama run gemma3:1b` to enable AI features")
+        st.info("Run `ollama run gemma3:4b` to enable AI features")
