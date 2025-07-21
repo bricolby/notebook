@@ -7,6 +7,45 @@ from document_processor import DocumentProcessor
 from llm_service import LLMService
 import time
 
+def _update_concept_mastery(concept_name: str, quiz_answers: dict):
+    """Update concept mastery based on quiz performance"""
+    # Get current concepts
+    stored_concepts = st.session_state.document_processor.get_concepts()
+    
+    # Find the concept and update its mastery
+    for concept in stored_concepts:
+        if concept["main"] == concept_name:
+            # Calculate performance
+            total_questions = len(quiz_answers)
+            correct_answers = sum(1 for answer in quiz_answers.values() if answer is True)
+            
+            print(f"Quiz performance: {correct_answers}/{total_questions} correct")
+            
+            # Update mastery based on performance
+            if correct_answers == total_questions:  # All correct
+                if concept["mastery_level"] < 3:  # Max level is 3
+                    concept["mastery_level"] += 1
+                    concept["progress"] = 0  # Reset progress for new level
+                    print(f"Leveled up {concept_name} to level {concept['mastery_level']}")
+                else:
+                    concept["progress"] = min(300, concept["progress"] + 50)  # Cap at 300
+                    print(f"Updated progress for {concept_name} to {concept['progress']}")
+            elif correct_answers >= total_questions * 0.7:  # 70% or better
+                concept["progress"] = min(300, concept["progress"] + 25)
+                print(f"Good performance for {concept_name}, progress: {concept['progress']}")
+            else:
+                # Poor performance - slight progress or none
+                concept["progress"] = max(0, concept["progress"] - 10)
+                print(f"Poor performance for {concept_name}, progress: {concept['progress']}")
+            
+            # Update in database
+            st.session_state.document_processor.update_concept_mastery(
+                concept["id"], 
+                concept["mastery_level"], 
+                concept["progress"]
+            )
+            break
+
 # Page configuration
 st.set_page_config(
     page_title="NotebookLM Clone",
@@ -78,6 +117,10 @@ st.markdown("""
         font-size: 1.1rem;
         font-weight: bold;
         margin-bottom: 1rem;
+        padding: 0.5rem;
+        background-color: white;
+        border-radius: 0.3rem;
+        border-left: 4px solid #1f77b4;
     }
     
     .quiz-option {
@@ -188,6 +231,10 @@ if 'current_question' not in st.session_state:
     st.session_state.current_question = 0
 if 'quiz_feedback' not in st.session_state:
     st.session_state.quiz_feedback = None
+if 'selected_concept' not in st.session_state:
+    st.session_state.selected_concept = None
+if 'concept_mastery_progress' not in st.session_state:
+    st.session_state.concept_mastery_progress = {}  # {concept_id: {"correct_in_row": 0, "current_level": 0}}
 if 'documents' not in st.session_state:
     st.session_state.documents = []
 if 'concepts' not in st.session_state:
@@ -357,11 +404,11 @@ with col1:
 with col2:
     st.markdown('<div class="column-header">💬 Chat Interface</div>', unsafe_allow_html=True)
     
-    # Chat container with scrollable area
-    chat_container = st.container()
+    # Main content container - switches between chat and quiz
+    main_container = st.container()
     
-    with chat_container:
-        # Create a scrollable chat area
+    with main_container:
+        # Create a scrollable area
         st.markdown("""
         <style>
         .chat-scroll-container {
@@ -376,149 +423,110 @@ with col2:
         </style>
         """, unsafe_allow_html=True)
         
-        # Chat history display in scrollable container
-        chat_html = '<div class="chat-scroll-container">'
-        for message in st.session_state.chat_history:
-            if message["role"] == "user":
-                chat_html += f'<div class="chat-message user">{message["content"]}</div>'
-            else:
-                chat_html += f'<div class="chat-message assistant">{message["content"]}</div>'
-        
-        # Quiz mode display
-        if st.session_state.quiz_mode and st.session_state.current_quiz:
-            chat_html += '<div class="quiz-container">'
-            chat_html += f"<h3>🎯 {st.session_state.current_quiz['title']}</h3>"
+        # Toggle between chat and quiz modes
+        if st.session_state.quiz_mode:
+            # Quiz Mode - create a fixed-height container
+            st.markdown("""
+            <style>
+            .quiz-fixed-container {
+                height: 60vh;
+                border: 1px solid #ddd;
+                border-radius: 0.5rem;
+                padding: 1rem;
+                margin-bottom: 1rem;
+                background-color: #f8f9fa;
+                overflow-y: auto;
+            }
+            </style>
+            """, unsafe_allow_html=True)
             
-            current_q = st.session_state.current_quiz['questions'][st.session_state.current_question]
-            chat_html += f'<div class="quiz-question">Question {st.session_state.current_question + 1}: {current_q["question"]}</div>'
-            
-            if current_q["type"] == "multiple_choice":
-                # Multiple choice options
-                selected_option = st.radio(
-                    "Select your answer:",
-                    current_q["options"],
-                    key=f"quiz_option_{st.session_state.current_question}"
-                )
-                
-                col_submit, col_next = st.columns([1, 1])
-                with col_submit:
-                    if st.button("Submit Answer", key="submit_quiz"):
-                        is_correct = selected_option == current_q["options"][current_q["correct"]]
-                        feedback_message = "Correct!" if is_correct else f"Incorrect. The correct answer is: {current_q['options'][current_q['correct']]}"
-                        
-                        # Add explanation if available
-                        if "explanation" in current_q:
-                            feedback_message += f"\n\n**Explanation:** {current_q['explanation']}"
-                        
-                        st.session_state.quiz_feedback = {
-                            "correct": is_correct,
-                            "message": feedback_message
-                        }
-                
-                with col_next:
-                    if st.session_state.quiz_feedback and st.button("Next Question", key="next_quiz"):
-                        st.session_state.current_question += 1
-                        st.session_state.quiz_feedback = None
-                        if st.session_state.current_question >= len(st.session_state.current_quiz['questions']):
-                            st.session_state.quiz_mode = False
-                            st.session_state.current_quiz = None
-                            st.rerun()
-                
-                # Display feedback
-                if st.session_state.quiz_feedback:
-                    feedback_class = "correct" if st.session_state.quiz_feedback["correct"] else "incorrect"
-                    chat_html += f'<div class="quiz-feedback {feedback_class}">{st.session_state.quiz_feedback["message"]}</div>'
-            
-            elif current_q["type"] == "text":
-                # Text input for text questions
-                text_answer = st.text_area("Your answer:", key=f"text_answer_{st.session_state.current_question}")
-                
-                col_submit, col_next = st.columns([1, 1])
-                with col_submit:
-                    if st.button("Submit Answer", key="submit_text"):
-                        # For text questions, we'll use a simple approach for now
-                        if "correct_answer" in current_q:
-                            # Simple keyword matching
-                            expected_keywords = current_q["correct_answer"].lower().split()
-                            user_keywords = text_answer.lower().split()
-                            overlap = len(set(expected_keywords) & set(user_keywords))
-                            is_correct = overlap > 0
-                        else:
-                            is_correct = len(text_answer.strip()) > 10  # Basic length check
-                        
-                        feedback_message = "Good answer!" if is_correct else "Consider providing more detail in your response."
-                        
-                        # Add explanation if available
-                        if "explanation" in current_q:
-                            feedback_message += f"\n\n**Explanation:** {current_q['explanation']}"
-                        
-                        st.session_state.quiz_feedback = {
-                            "correct": is_correct,
-                            "message": feedback_message
-                        }
-                
-                with col_next:
-                    if st.session_state.quiz_feedback and st.button("Next Question", key="next_text"):
-                        st.session_state.current_question += 1
-                        st.session_state.quiz_feedback = None
-                        if st.session_state.current_question >= len(st.session_state.current_quiz['questions']):
-                            st.session_state.quiz_mode = False
-                            st.session_state.current_quiz = None
-                            st.rerun()
-                
-                # Display feedback
-                if st.session_state.quiz_feedback:
-                    feedback_class = "correct" if st.session_state.quiz_feedback["correct"] else "incorrect"
-                    chat_html += f'<div class="quiz-feedback {feedback_class}">{st.session_state.quiz_feedback["message"]}</div>'
-            
-            chat_html += '</div>'
-        
-        chat_html += '</div>'
-        st.markdown(chat_html, unsafe_allow_html=True)
-    
-    # Input area at bottom
-    input_container = st.container()
-    with input_container:
-        # Inline input controls
-        col_input, col_send, col_quiz = st.columns([3, 1, 1])
-        
-        with col_input:
-            user_input = st.text_input("", label_visibility="collapsed", key="user_input", placeholder="Type your message here...")
-        
-        with col_send:
-            send_button = st.button("Send", type="primary")
-            if send_button and user_input:
-                st.session_state.chat_history.append({"role": "user", "content": user_input})
-                
-                # Check Ollama connection
-                if not st.session_state.ollama_status:
-                    st.session_state.ollama_status = st.session_state.llm_service.check_ollama_connection()
-                
-                if st.session_state.ollama_status:
-                    # Search documents for relevant content
-                    search_results = st.session_state.document_processor.search_documents(user_input, top_k=3)
-                    
-                    if search_results:
-                        # Generate RAG response using LLM
-                        with st.spinner("Generating response..."):
-                            ai_response = st.session_state.llm_service.generate_rag_response(user_input, search_results)
-                    else:
-                        ai_response = "I don't have any relevant information in your uploaded documents about your question. Try uploading some documents first!"
-                else:
-                    ai_response = "⚠️ Ollama is not running. Please start Ollama with a model (e.g., `ollama run gemma3:1b`) to enable AI responses."
-                
-                st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
+            # Back to Chat button at the top
+            if st.button("← Back to Chat", type="secondary"):
+                st.session_state.quiz_mode = False
+                st.session_state.selected_concept = None
+                st.session_state.current_quiz = None
+                st.session_state.current_question = 0
+                st.session_state.quiz_answers = {}
+                st.session_state.quiz_feedback = None
                 st.rerun()
-        
-        with col_quiz:
-            quiz_button = st.button("🎯 Quiz", type="secondary")
-            if quiz_button:
-                st.session_state.quiz_mode = not st.session_state.quiz_mode
-                if st.session_state.quiz_mode:
-                    # Generate quiz questions dynamically
-                    documents = st.session_state.document_processor.get_documents()
-                    if documents:
-                        # Get chunks from all documents
+            
+            # Create the fixed container
+            quiz_container = st.container()
+            
+            with quiz_container:
+                # st.markdown('<div class="quiz-fixed-container">', unsafe_allow_html=True)
+                
+                # Step 1: Concept Selection
+                if st.session_state.selected_concept is None:
+                    st.markdown('<div>🎯 Quiz Setup</div>', unsafe_allow_html=True)
+                    st.markdown('<div>Select a concept to quiz on:</div>', unsafe_allow_html=True)
+                    
+                    # Get available concepts
+                    stored_concepts = st.session_state.document_processor.get_concepts()
+                    if stored_concepts:
+                        # Create unique concept list (main concepts)
+                        unique_concepts = list(set([concept["main"] for concept in stored_concepts]))
+                        unique_concepts.sort()
+                        
+                        selected_concept_name = st.selectbox(
+                            "Choose a concept:",
+                            options=unique_concepts,
+                            key="concept_selector"
+                        )
+                        
+                        if st.button("Start Quiz", type="primary"):
+                            st.session_state.selected_concept = selected_concept_name
+                            st.rerun()
+                    else:
+                        st.warning("No concepts available. Upload some documents first!")
+                        if st.button("Cancel Quiz"):
+                            st.session_state.quiz_mode = False
+                            st.rerun()
+                
+                # Step 2: Quiz Questions
+                elif st.session_state.current_quiz is None:
+                    # Generate quiz questions for selected concept
+                    st.markdown(f'<div>🎯 Quiz on: {st.session_state.selected_concept}</div>', unsafe_allow_html=True)
+                    
+                    # Get mastery level for this concept
+                    stored_concepts = st.session_state.document_processor.get_concepts()
+                    concept_mastery = 0
+                    for concept in stored_concepts:
+                        if concept["main"] == st.session_state.selected_concept:
+                            concept_mastery = concept["mastery_level"]
+                            break
+                    
+                    # Convert mastery level to Bloom's Taxonomy name
+                    bloom_names = {1: "Recall", 2: "Understanding", 3: "Apply"}
+                    current_bloom = bloom_names.get(concept_mastery, "Unknown")
+                    next_bloom = bloom_names.get(concept_mastery + 1, "Unknown")
+                    
+                    st.markdown(f'<div>Current Level: {current_bloom} (Level {concept_mastery})</div>', unsafe_allow_html=True)
+                    # st.markdown(f'<div class="quiz-question">Next Level: {next_bloom}</div>', unsafe_allow_html=True)
+                    
+                    # Test button for debugging
+                    # # if st.button("Test Quiz Generation", type="secondary"):
+                    #     # Get chunks related to this concept
+                    #     documents = st.session_state.document_processor.get_documents()
+                    #     all_chunks = []
+                    #     for doc in documents:
+                    #         chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
+                    #         all_chunks.extend([chunk['text'] for chunk in chunks])
+                        
+                    #     if all_chunks and st.session_state.ollama_status:
+                    #         with st.spinner("Testing quiz generation..."):
+                    #             test_questions = st.session_state.llm_service.test_quiz_generation(
+                    #                 all_chunks, 
+                    #                 mastery_level=concept_mastery + 1,  # Next level
+                    #                 num_questions=1
+                    #             )
+                    #             st.write("Test questions generated:", test_questions)
+                    #     else:
+                    #         st.error("No documents available or Ollama not connected")
+                    
+                    if st.button("Generate Questions", type="primary"):
+                        # Get chunks related to this concept
+                        documents = st.session_state.document_processor.get_documents()
                         all_chunks = []
                         for doc in documents:
                             chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
@@ -526,25 +534,165 @@ with col2:
                         
                         if all_chunks and st.session_state.ollama_status:
                             with st.spinner("Generating quiz questions..."):
-                                questions = st.session_state.llm_service.generate_quiz_questions(all_chunks, mastery_level=1, num_questions=3)
+                                questions = st.session_state.llm_service.generate_quiz_questions(
+                                    all_chunks, 
+                                    mastery_level=concept_mastery + 1,  # Next level
+                                    num_questions=3
+                                )
                                 if questions:
-                                    st.session_state.current_quiz = {"title": "Generated Quiz", "questions": questions}
+                                    st.session_state.current_quiz = {
+                                        "title": f"Quiz on {st.session_state.selected_concept}",
+                                        "questions": questions,
+                                        "concept": st.session_state.selected_concept,
+                                        "mastery_level": concept_mastery
+                                    }
                                     st.session_state.current_question = 0
                                     st.session_state.quiz_answers = {}
                                     st.session_state.quiz_feedback = None
+                                    st.rerun()
                                 else:
-                                    st.session_state.current_quiz = sample_quiz  # Fallback
-                                    st.session_state.current_question = 0
-                                    st.session_state.quiz_answers = {}
-                                    st.session_state.quiz_feedback = None
+                                    st.error("Failed to generate quiz questions")
                         else:
-                            st.session_state.current_quiz = sample_quiz  # Fallback
-                            st.session_state.current_question = 0
-                            st.session_state.quiz_answers = {}
+                            st.error("No documents available or Ollama not connected")
+                
+                # Step 3: Display Quiz Questions
+                elif st.session_state.current_quiz:
+                    st.markdown(f'<div class="quiz-question">{st.session_state.current_quiz["title"]}</div>', unsafe_allow_html=True)
+                    
+                    current_q = st.session_state.current_quiz["questions"][st.session_state.current_question]
+                    
+                    # Console output for current question
+                    print(f"\n=== QUESTION {st.session_state.current_question + 1} ===")
+                    print(f"Question: {current_q.get('question')}")
+                    print(f"Type: {current_q.get('type')}")
+                    print(f"Options: {current_q.get('options')}")
+                    print(f"Correct Index: {current_q.get('correct')}")
+                    print(f"Correct Answer: {current_q.get('correct_answer')}")
+                    print(f"Explanation: {current_q.get('explanation')}")
+                    print("=" * 50)
+                    
+                    st.markdown(f'<div class="quiz-question">Question {st.session_state.current_question + 1}: {current_q["question"]}</div>', unsafe_allow_html=True)
+                    
+                    # # Debug: Show question structure
+                    # st.write(f"Debug - Question type: {current_q.get('type')}")
+                    # st.write(f"Debug - Has options: {'options' in current_q}")
+                    # st.write(f"Debug - Options: {current_q.get('options', 'None')}")
+                    
+                    if current_q["type"] in ["multiple_choice", "recall"]:
+                        if "options" in current_q and len(current_q["options"]) > 0:
+                            # # Debug: Show correct answer info
+                            # st.write(f"Debug - Correct index: {current_q.get('correct')}")
+                            # st.write(f"Debug - Correct answer text: {current_q.get('correct_answer')}")
+                            # st.write(f"Debug - Options: {current_q.get('options')}")
+                            
+                            for i, option in enumerate(current_q["options"]):
+                                if st.button(f"{chr(65+i)}. {option}", key=f"quiz_option_{i}"):
+                                    st.session_state.quiz_answers[st.session_state.current_question] = i
+                                    correct_index = current_q.get("correct", 0)
+                                    is_correct = i == correct_index
+                                    print(f"ANSWER SELECTED:")
+                                    print(f"  Selected index: {i}")
+                                    print(f"  Selected option: {option}")
+                                    print(f"  Correct index: {correct_index}")
+                                    print(f"  Correct option: {current_q['options'][correct_index] if correct_index < len(current_q['options']) else 'Invalid'}")
+                                    print(f"  Is correct: {is_correct}")
+                                    st.write(f"Debug - Selected index: {i}, Correct index: {correct_index}, Is correct: {is_correct}")
+                                    st.session_state.quiz_feedback = is_correct
+                                    st.rerun()
+                        else:
+                            st.error("Multiple choice question missing options!")
+                            st.write("Question data:", current_q)
+                    
+                    # Display feedback
+                    if st.session_state.quiz_feedback is not None:
+                        if st.session_state.quiz_feedback:
+                            st.markdown('<div class="quiz-feedback correct">✅ Correct!</div>', unsafe_allow_html=True)
+                        else:
+                            st.markdown('<div class="quiz-feedback incorrect">❌ Incorrect!</div>', unsafe_allow_html=True)
+                        
+                        # Show Bloom's Taxonomy level
+                        # bloom_level = current_q.get("bloom_level", "Unknown")
+                        # st.markdown(f'<div class="quiz-feedback">Bloom\'s Level: {bloom_level}</div>', unsafe_allow_html=True)
+                        
+                        # Show explanation with fallback
+                        explanation = current_q.get("explanation", "No explanation available.")
+                        st.markdown(f'<div class="quiz-feedback">Explanation: {explanation}</div>', unsafe_allow_html=True)
+                        
+                        if st.button("Next Question"):
+                            st.session_state.current_question += 1
                             st.session_state.quiz_feedback = None
+                            if st.session_state.current_question >= len(st.session_state.current_quiz["questions"]):
+                                # Quiz completed - update mastery
+                                _update_concept_mastery(st.session_state.current_quiz["concept"], st.session_state.quiz_answers)
+                                st.session_state.quiz_mode = False
+                                st.session_state.current_quiz = None
+                                st.session_state.selected_concept = None
+                            st.rerun()
+                
+                # Fallback case
+                else:
+                    st.info("Quiz state not recognized. Please try again.")
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+        
+        else:
+            # Chat Mode
+            # Chat history display in scrollable container
+            chat_html = '<div class="chat-scroll-container">'
+            for message in st.session_state.chat_history:
+                if message["role"] == "user":
+                    chat_html += f'<div class="chat-message user">{message["content"]}</div>'
+                else:
+                    chat_html += f'<div class="chat-message assistant">{message["content"]}</div>'
+            
+            chat_html += '</div>'
+            st.markdown(chat_html, unsafe_allow_html=True)
+    
+    # Input area at bottom
+    input_container = st.container()
+    with input_container:
+        # Only show input controls in chat mode
+        if not st.session_state.quiz_mode:
+            # Inline input controls
+            col_input, col_send, col_quiz = st.columns([3, 1, 1])
+            
+            with col_input:
+                user_input = st.text_input("", label_visibility="collapsed", key="user_input", placeholder="Type your message here...")
+            
+            with col_send:
+                send_button = st.button("Send", type="primary")
+                if send_button and user_input:
+                    st.session_state.chat_history.append({"role": "user", "content": user_input})
+                    
+                    # Check Ollama connection
+                    if not st.session_state.ollama_status:
+                        st.session_state.ollama_status = st.session_state.llm_service.check_ollama_connection()
+                    
+                    if st.session_state.ollama_status:
+                        # Search documents for relevant content
+                        search_results = st.session_state.document_processor.search_documents(user_input, top_k=3)
+                        
+                        if search_results:
+                            # Generate RAG response using LLM
+                            with st.spinner("Generating response..."):
+                                ai_response = st.session_state.llm_service.generate_rag_response(user_input, search_results)
+                        else:
+                            ai_response = "I don't have any relevant information in your uploaded documents about your question. Try uploading some documents first!"
                     else:
-                        st.warning("Please upload some documents first to generate a quiz!")
-                        st.session_state.quiz_mode = False
+                        ai_response = "⚠️ Ollama is not running. Please start Ollama with a model (e.g., `ollama run gemma3:1b`) to enable AI responses."
+                    
+                    st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
+                    st.rerun()
+            
+            with col_quiz:
+                quiz_button = st.button("🎯 Quiz", type="secondary")
+                if quiz_button:
+                    st.session_state.quiz_mode = True
+                    st.session_state.selected_concept = None
+                    st.session_state.current_quiz = None
+                    st.session_state.current_question = 0
+                    st.session_state.quiz_answers = {}
+                    st.session_state.quiz_feedback = None
 
 # Right Column - Concepts and Mastery
 with col3:
@@ -568,7 +716,7 @@ with col3:
             st.markdown(f'<div class="main-concept">{main_concept}</div>', unsafe_allow_html=True)
             
             for concept in sub_concepts:
-                st.markdown('<div class="concept-item">', unsafe_allow_html=True)
+                # st.markdown('<div class="concept-item">', unsafe_allow_html=True)
                 st.markdown(f'<div class="concept-title">{concept["sub"]}</div>', unsafe_allow_html=True)
                 
                 # Mastery level indicator
