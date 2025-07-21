@@ -247,84 +247,85 @@ st.markdown('<h1 class="main-header">📚 NotebookLM Clone</h1>', unsafe_allow_h
 # Create three columns
 col1, col2, col3 = st.columns([1, 2, 1])
 
-# Left Column - Document Upload (Collapsible)
+# Left Column - Document Upload and Management
 with col1:
     st.markdown('<div class="column-header">📁 Documents</div>', unsafe_allow_html=True)
     
-    # Collapsible section
-    with st.expander("Upload Documents", expanded=True):
-        uploaded_files = st.file_uploader(
-            "Choose files to upload",
-            type=['pdf', 'txt', 'docx', 'md'],
-            accept_multiple_files=True,
-            help="Upload documents to study"
-        )
-        
-        # Process uploaded files
-        if uploaded_files:
-            for uploaded_file in uploaded_files:
-                with st.spinner(f"Processing {uploaded_file.name}..."):
-                    result = st.session_state.document_processor.process_document(uploaded_file, uploaded_file.name)
-                    
-                    if result["success"]:
-                        if result["status"] == "already_exists":
-                            st.success(f"✅ {result['message']}")
-                        else:
-                            st.success(f"✅ {result['message']}")
-                            st.session_state.upload_status.append({
-                                "filename": uploaded_file.name,
-                                "status": "success",
-                                "message": result["message"],
-                                "chunk_count": result.get("chunk_count", 0)
-                            })
+    # Upload section at the top
+    st.markdown("### 📤 Upload Documents")
+    uploaded_files = st.file_uploader(
+        "Choose files to upload",
+        type=['pdf', 'txt', 'docx', 'md'],
+        accept_multiple_files=True,
+        help="Upload documents to study"
+    )
+    
+    # Process uploaded files
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            with st.spinner(f"Processing {uploaded_file.name}..."):
+                result = st.session_state.document_processor.process_document(uploaded_file, uploaded_file.name)
+                
+                if result["success"]:
+                    if result["status"] == "already_exists":
+                        st.success(f"✅ {result['message']}")
                     else:
-                        st.error(f"❌ {result['message']}")
+                        st.success(f"✅ {result['message']}")
                         st.session_state.upload_status.append({
                             "filename": uploaded_file.name,
-                            "status": "error",
-                            "message": result["message"]
+                            "status": "success",
+                            "message": result["message"],
+                            "chunk_count": result.get("chunk_count", 0)
                         })
-        
-        # Display uploaded documents
-        st.markdown("### 📚 Uploaded Documents")
-        
-        # Get documents from database
-        documents = st.session_state.document_processor.get_documents()
-        
-        if documents:
-            for doc in documents:
-                with st.expander(f"📄 {doc['filename']}", expanded=False):
-                    col_info, col_actions = st.columns([3, 1])
-                    
-                    with col_info:
-                        st.write(f"**Size:** {doc['file_size']:,} bytes")
-                        st.write(f"**Chunks:** {doc['chunk_count']}")
-                        st.write(f"**Status:** {doc['status']}")
-                        st.write(f"**Uploaded:** {doc['upload_date']}")
-                    
-                    with col_actions:
-                        if st.button("🗑️", key=f"delete_{doc['id']}", help="Delete document"):
-                            # TODO: Implement delete functionality
-                            st.info("Delete functionality coming soon!")
-                        
-                        if st.button("👁️", key=f"view_{doc['id']}", help="View chunks"):
-                            chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
-                            st.write(f"**Document has {len(chunks)} chunks:**")
-                            for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
-                                st.text_area(f"Chunk {chunk['index']}", chunk['text'][:200] + "...", height=100)
-                            if len(chunks) > 3:
-                                st.info(f"... and {len(chunks) - 3} more chunks")
-        else:
-            st.info("No documents uploaded yet. Upload some documents to get started!")
-        
-        # Display upload status history
-        if st.session_state.upload_status:
-            st.markdown("### 📊 Upload History")
-            for status in st.session_state.upload_status[-5:]:  # Show last 5
-                if status["status"] == "success":
-                    st.success(f"✅ {status['filename']} - {status['message']}")
                 else:
-                    st.error(f"❌ {status['filename']} - {status['message']}")
+                    st.error(f"❌ {result['message']}")
+                    st.session_state.upload_status.append({
+                        "filename": uploaded_file.name,
+                        "status": "error",
+                        "message": result["message"]
+                    })
+    
+    # Display uploaded documents as individual expanders
+    st.markdown("### 📚 Your Documents")
+    
+    # Get documents from database
+    documents = st.session_state.document_processor.get_documents()
+    
+    if documents:
+        for doc in documents:
+            with st.expander(f"📄 {doc['filename']}", expanded=False):
+                col_info, col_actions = st.columns([3, 1])
+                
+                with col_info:
+                    st.write(f"**Size:** {doc['file_size']:,} bytes")
+                    st.write(f"**Chunks:** {doc['chunk_count']}")
+                    st.write(f"**Status:** {doc['status']}")
+                    st.write(f"**Uploaded:** {doc['upload_date']}")
+                    if st.button("👁️", key=f"view_{doc['id']}", help="View chunks"):
+                        chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
+                        st.write(f"**Document has {len(chunks)} chunks:**")
+                        for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
+                            st.text_area(f"Chunk {chunk['index']}", chunk['text'][:200] + "...", height=100)
+                        if len(chunks) > 3:
+                            st.info(f"... and {len(chunks) - 3} more chunks")
+                
+                with col_actions:
+                    if st.button("🗑️", key=f"delete_{doc['id']}", help="Delete document"):
+                        # TODO: Implement delete functionality
+                        st.info("Delete functionality coming soon!")
+                    
+
+    else:
+        st.info("No documents uploaded yet. Upload some documents to get started!")
+    
+    # Display upload status history
+    if st.session_state.upload_status:
+        st.markdown("### 📊 Upload History")
+        for status in st.session_state.upload_status[-5:]:  # Show last 5
+            if status["status"] == "success":
+                st.success(f"✅ {status['filename']} - {status['message']}")
+            else:
+                st.error(f"❌ {status['filename']} - {status['message']}")
 
 # Middle Column - Chat Interface
 with col2:
