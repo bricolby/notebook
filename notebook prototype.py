@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from streamlit_ace import st_ace
 import json
 from document_processor import DocumentProcessor
+from llm_service import LLMService
 import time
 
 # Page configuration
@@ -155,9 +156,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize document processor
+# Initialize services
 if 'document_processor' not in st.session_state:
     st.session_state.document_processor = DocumentProcessor()
+
+if 'llm_service' not in st.session_state:
+    st.session_state.llm_service = LLMService()
 
 # Initialize session state
 if 'chat_history' not in st.session_state:
@@ -178,6 +182,8 @@ if 'concepts' not in st.session_state:
     st.session_state.concepts = []
 if 'upload_status' not in st.session_state:
     st.session_state.upload_status = []
+if 'ollama_status' not in st.session_state:
+    st.session_state.ollama_status = None
 
 # Sample concepts data
 sample_concepts = [
@@ -277,6 +283,10 @@ with col1:
                             "message": result["message"],
                             "chunk_count": result.get("chunk_count", 0)
                         })
+                        
+                        # Trigger concept extraction after successful upload
+                        if st.session_state.ollama_status:
+                            st.info("🔄 Extracting concepts from new document...")
                 else:
                     st.error(f"❌ {result['message']}")
                     st.session_state.upload_status.append({
@@ -294,26 +304,30 @@ with col1:
     if documents:
         for doc in documents:
             with st.expander(f"📄 {doc['filename']}", expanded=False):
-                col_info, col_actions = st.columns([3, 1])
+                st.write(f"**Size:** {doc['file_size']:,} bytes")
+                st.write(f"**Chunks:** {doc['chunk_count']}")
+                st.write(f"**Status:** {doc['status']}")
+                st.write(f"**Uploaded:** {doc['upload_date']}")
                 
-                with col_info:
-                    st.write(f"**Size:** {doc['file_size']:,} bytes")
-                    st.write(f"**Chunks:** {doc['chunk_count']}")
-                    st.write(f"**Status:** {doc['status']}")
-                    st.write(f"**Uploaded:** {doc['upload_date']}")
-                    if st.button("👁️", key=f"view_{doc['id']}", help="View chunks"):
-                        chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
-                        st.write(f"**Document has {len(chunks)} chunks:**")
-                        for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
-                            st.text_area(f"Chunk {chunk['index']}", chunk['text'][:200] + "...", height=100)
-                        if len(chunks) > 3:
-                            st.info(f"... and {len(chunks) - 3} more chunks")
+                # View button
+                if st.button("👁️", key=f"view_{doc['id']}", help="View chunks"):
+                    chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
+                    st.write(f"**Document has {len(chunks)} chunks:**")
+                    for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
+                        st.text_area(f"Chunk {chunk['index']}", chunk['text'][:200] + "...", height=100)
+                    if len(chunks) > 3:
+                        st.info(f"... and {len(chunks) - 3} more chunks")
                 
-                with col_actions:
-                    if st.button("🗑️", key=f"delete_{doc['id']}", help="Delete document"):
-                        # TODO: Implement delete functionality
-                        st.info("Delete functionality coming soon!")
-                    
+                # Delete button
+                if st.button("🗑️", key=f"delete_{doc['id']}", help="Delete document"):
+                    with st.spinner(f"Deleting {doc['filename']}..."):
+                        result = st.session_state.document_processor.delete_document(doc['id'])
+                        
+                        if result["success"]:
+                            st.success(f"✅ {result['message']}")
+                            st.rerun()  # Refresh the page to update the document list
+                        else:
+                            st.error(f"❌ {result['message']}")
 
     else:
         st.info("No documents uploaded yet. Upload some documents to get started!")
@@ -351,10 +365,36 @@ with col2:
         if st.button("🎯 Quiz Mode", type="primary"):
             st.session_state.quiz_mode = not st.session_state.quiz_mode
             if st.session_state.quiz_mode:
-                st.session_state.current_quiz = sample_quiz
-                st.session_state.current_question = 0
-                st.session_state.quiz_answers = {}
-                st.session_state.quiz_feedback = None
+                # Generate quiz questions dynamically
+                documents = st.session_state.document_processor.get_documents()
+                if documents:
+                    # Get chunks from all documents
+                    all_chunks = []
+                    for doc in documents:
+                        chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
+                        all_chunks.extend([chunk['text'] for chunk in chunks])
+                    
+                    if all_chunks and st.session_state.ollama_status:
+                        with st.spinner("Generating quiz questions..."):
+                            questions = st.session_state.llm_service.generate_quiz_questions(all_chunks, mastery_level=1, num_questions=3)
+                            if questions:
+                                st.session_state.current_quiz = {"title": "Generated Quiz", "questions": questions}
+                                st.session_state.current_question = 0
+                                st.session_state.quiz_answers = {}
+                                st.session_state.quiz_feedback = None
+                            else:
+                                st.session_state.current_quiz = sample_quiz  # Fallback
+                                st.session_state.current_question = 0
+                                st.session_state.quiz_answers = {}
+                                st.session_state.quiz_feedback = None
+                    else:
+                        st.session_state.current_quiz = sample_quiz  # Fallback
+                        st.session_state.current_question = 0
+                        st.session_state.quiz_answers = {}
+                        st.session_state.quiz_feedback = None
+                else:
+                    st.warning("Please upload some documents first to generate a quiz!")
+                    st.session_state.quiz_mode = False
     
     # Chat history display
     chat_container = st.container()
@@ -389,9 +429,15 @@ with col2:
                 with col_submit:
                     if st.button("Submit Answer", key="submit_quiz"):
                         is_correct = selected_option == current_q["options"][current_q["correct"]]
+                        feedback_message = "Correct!" if is_correct else f"Incorrect. The correct answer is: {current_q['options'][current_q['correct']]}"
+                        
+                        # Add explanation if available
+                        if "explanation" in current_q:
+                            feedback_message += f"\n\n**Explanation:** {current_q['explanation']}"
+                        
                         st.session_state.quiz_feedback = {
                             "correct": is_correct,
-                            "message": "Correct!" if is_correct else f"Incorrect. The correct answer is: {current_q['options'][current_q['correct']]}"
+                            "message": feedback_message
                         }
                 
                 with col_next:
@@ -415,12 +461,26 @@ with col2:
                 col_submit, col_next = st.columns([1, 1])
                 with col_submit:
                     if st.button("Submit Answer", key="submit_text"):
-                        # Simple keyword matching for demo
-                        keywords = ["classification", "regression", "discrete", "continuous"]
-                        is_correct = any(keyword in text_answer.lower() for keyword in keywords)
+                        # For text questions, we'll use a simple approach for now
+                        # In a full implementation, you'd want to use the LLM to evaluate the answer
+                        if "correct_answer" in current_q:
+                            # Simple keyword matching
+                            expected_keywords = current_q["correct_answer"].lower().split()
+                            user_keywords = text_answer.lower().split()
+                            overlap = len(set(expected_keywords) & set(user_keywords))
+                            is_correct = overlap > 0
+                        else:
+                            is_correct = len(text_answer.strip()) > 10  # Basic length check
+                        
+                        feedback_message = "Good answer!" if is_correct else "Consider providing more detail in your response."
+                        
+                        # Add explanation if available
+                        if "explanation" in current_q:
+                            feedback_message += f"\n\n**Explanation:** {current_q['explanation']}"
+                        
                         st.session_state.quiz_feedback = {
                             "correct": is_correct,
-                            "message": "Good answer!" if is_correct else f"Consider the difference between discrete and continuous outputs."
+                            "message": feedback_message
                         }
                 
                 with col_next:
@@ -443,15 +503,22 @@ with col2:
     if user_input and st.button("Send"):
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
-        # Search documents for relevant content
-        search_results = st.session_state.document_processor.search_documents(user_input, top_k=3)
+        # Check Ollama connection
+        if not st.session_state.ollama_status:
+            st.session_state.ollama_status = st.session_state.llm_service.check_ollama_connection()
         
-        if search_results:
-            # Create response based on search results
-            context = "\n\n".join([f"From {result['document_name']}: {result['chunk_text'][:300]}..." for result in search_results])
-            ai_response = f"Based on your uploaded documents, here's what I found:\n\n{context}\n\nThis is a simulated response. In a full implementation, this would be processed by an AI model."
+        if st.session_state.ollama_status:
+            # Search documents for relevant content
+            search_results = st.session_state.document_processor.search_documents(user_input, top_k=3)
+            
+            if search_results:
+                # Generate RAG response using LLM
+                with st.spinner("Generating response..."):
+                    ai_response = st.session_state.llm_service.generate_rag_response(user_input, search_results)
+            else:
+                ai_response = "I don't have any relevant information in your uploaded documents about your question. Try uploading some documents first!"
         else:
-            ai_response = f"I don't have any relevant information in your uploaded documents about '{user_input}'. Try uploading some documents first!"
+            ai_response = "⚠️ Ollama is not running. Please start Ollama with a model (e.g., `ollama run gemma3:1b`) to enable AI responses."
         
         st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
         st.rerun()
@@ -460,57 +527,126 @@ with col2:
 with col3:
     st.markdown('<div class="column-header">🎯 Concepts & Mastery</div>', unsafe_allow_html=True)
     
-    # Group concepts by main concept
-    concept_groups = {}
-    for concept in sample_concepts:
-        main = concept["main"]
-        if main not in concept_groups:
-            concept_groups[main] = []
-        concept_groups[main].append(concept)
-    
-    # Display concepts with mastery bars
-    for main_concept, sub_concepts in concept_groups.items():
-        st.markdown(f"<h4>{main_concept}</h4>", unsafe_allow_html=True)
+    # Extract concepts from uploaded documents
+    documents = st.session_state.document_processor.get_documents()
+    if documents and st.session_state.ollama_status:
+        # Get all chunks from documents
+        all_chunks = []
+        for doc in documents:
+            chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
+            all_chunks.extend([chunk['text'] for chunk in chunks])
         
-        for concept in sub_concepts:
-            st.markdown('<div class="concept-item">', unsafe_allow_html=True)
-            st.markdown(f'<div class="concept-title">{concept["sub"]}</div>', unsafe_allow_html=True)
+        if all_chunks:
+            # Extract concepts using LLM
+            with st.spinner("Extracting concepts..."):
+                extracted_concepts = st.session_state.llm_service.extract_concepts(all_chunks)
+                
+                if extracted_concepts:
+                    # Group concepts by main concept
+                    concept_groups = {}
+                    for concept in extracted_concepts:
+                        main = concept["main"]
+                        if main not in concept_groups:
+                            concept_groups[main] = []
+                        concept_groups[main].append(concept)
+                    
+                    # Display concepts with mastery bars
+                    for main_concept, sub_concepts in concept_groups.items():
+                        st.markdown(f"<h4>{main_concept}</h4>", unsafe_allow_html=True)
+                        
+                        for concept in sub_concepts:
+                            st.markdown('<div class="concept-item">', unsafe_allow_html=True)
+                            st.markdown(f'<div class="concept-title">{concept["sub"]}</div>', unsafe_allow_html=True)
+                            
+                            # Add description if available
+                            if "description" in concept:
+                                st.markdown(f'<div class="concept-subtitle">{concept["description"]}</div>', unsafe_allow_html=True)
+                            
+                            # Mastery level indicator (default to 0 for new concepts)
+                            mastery_level = 0
+                            progress = 0
+                            mastery_text = "Not Started"
+                            
+                            st.markdown(f'<div class="concept-subtitle">Mastery: {mastery_text}</div>', unsafe_allow_html=True)
+                            
+                            # Mastery bar
+                            st.markdown('<div class="mastery-bar">', unsafe_allow_html=True)
+                            
+                            # Level 1 (Blue) - Always show if any progress
+                            if mastery_level >= 1:
+                                level1_width = min(100, progress)
+                                st.markdown(f'<div class="mastery-level-1" style="width: {level1_width}%"></div>', unsafe_allow_html=True)
+                            
+                            # Level 2 (Gold) - Show if level 2 or higher
+                            if mastery_level >= 2:
+                                level2_width = min(100, max(0, progress - 100))
+                                if level2_width > 0:
+                                    st.markdown(f'<div class="mastery-level-2" style="width: {level2_width}%; position: absolute; top: 0; left: 0;"></div>', unsafe_allow_html=True)
+                            
+                            # Level 3 (Orange) - Show if level 3
+                            if mastery_level >= 3:
+                                level3_width = min(100, max(0, progress - 200))
+                                if level3_width > 0:
+                                    st.markdown(f'<div class="mastery-level-3" style="width: {level3_width}%; position: absolute; top: 0; left: 0;"></div>', unsafe_allow_html=True)
+                            
+                            st.markdown('</div>', unsafe_allow_html=True)
+                            st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    st.info("No concepts extracted yet. Upload more documents to extract concepts.")
+        else:
+            st.info("No documents uploaded yet. Upload some documents to extract concepts.")
+    else:
+        # Fallback to sample concepts if no documents or Ollama not available
+        concept_groups = {}
+        for concept in sample_concepts:
+            main = concept["main"]
+            if main not in concept_groups:
+                concept_groups[main] = []
+            concept_groups[main].append(concept)
+        
+        # Display concepts with mastery bars
+        for main_concept, sub_concepts in concept_groups.items():
+            st.markdown(f"<h4>{main_concept}</h4>", unsafe_allow_html=True)
             
-            # Mastery level indicator
-            mastery_text = ""
-            if concept["mastery_level"] == 0:
-                mastery_text = "Not Started"
-            elif concept["mastery_level"] == 1:
-                mastery_text = "Recall Level"
-            elif concept["mastery_level"] == 2:
-                mastery_text = "Understanding Level"
-            elif concept["mastery_level"] == 3:
-                mastery_text = "Apply Level"
-            
-            st.markdown(f'<div class="concept-subtitle">Mastery: {mastery_text}</div>', unsafe_allow_html=True)
-            
-            # Mastery bar
-            st.markdown('<div class="mastery-bar">', unsafe_allow_html=True)
-            
-            # Level 1 (Blue) - Always show if any progress
-            if concept["mastery_level"] >= 1:
-                level1_width = min(100, concept["progress"])
-                st.markdown(f'<div class="mastery-level-1" style="width: {level1_width}%"></div>', unsafe_allow_html=True)
-            
-            # Level 2 (Gold) - Show if level 2 or higher
-            if concept["mastery_level"] >= 2:
-                level2_width = min(100, max(0, concept["progress"] - 100))
-                if level2_width > 0:
-                    st.markdown(f'<div class="mastery-level-2" style="width: {level2_width}%; position: absolute; top: 0; left: 0;"></div>', unsafe_allow_html=True)
-            
-            # Level 3 (Orange) - Show if level 3
-            if concept["mastery_level"] >= 3:
-                level3_width = min(100, max(0, concept["progress"] - 200))
-                if level3_width > 0:
-                    st.markdown(f'<div class="mastery-level-3" style="width: {level3_width}%; position: absolute; top: 0; left: 0;"></div>', unsafe_allow_html=True)
-            
-            st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+            for concept in sub_concepts:
+                st.markdown('<div class="concept-item">', unsafe_allow_html=True)
+                st.markdown(f'<div class="concept-title">{concept["sub"]}</div>', unsafe_allow_html=True)
+                
+                # Mastery level indicator
+                mastery_text = ""
+                if concept["mastery_level"] == 0:
+                    mastery_text = "Not Started"
+                elif concept["mastery_level"] == 1:
+                    mastery_text = "Recall Level"
+                elif concept["mastery_level"] == 2:
+                    mastery_text = "Understanding Level"
+                elif concept["mastery_level"] == 3:
+                    mastery_text = "Apply Level"
+                
+                st.markdown(f'<div class="concept-subtitle">Mastery: {mastery_text}</div>', unsafe_allow_html=True)
+                
+                # Mastery bar
+                st.markdown('<div class="mastery-bar">', unsafe_allow_html=True)
+                
+                # Level 1 (Blue) - Always show if any progress
+                if concept["mastery_level"] >= 1:
+                    level1_width = min(100, concept["progress"])
+                    st.markdown(f'<div class="mastery-level-1" style="width: {level1_width}%"></div>', unsafe_allow_html=True)
+                
+                # Level 2 (Gold) - Show if level 2 or higher
+                if concept["mastery_level"] >= 2:
+                    level2_width = min(100, max(0, concept["progress"] - 100))
+                    if level2_width > 0:
+                        st.markdown(f'<div class="mastery-level-2" style="width: {level2_width}%; position: absolute; top: 0; left: 0;"></div>', unsafe_allow_html=True)
+                
+                # Level 3 (Orange) - Show if level 3
+                if concept["mastery_level"] >= 3:
+                    level3_width = min(100, max(0, concept["progress"] - 200))
+                    if level3_width > 0:
+                        st.markdown(f'<div class="mastery-level-3" style="width: {level3_width}%; position: absolute; top: 0; left: 0;"></div>', unsafe_allow_html=True)
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
     
     # Mastery level legend
     st.markdown("---")
@@ -518,6 +654,13 @@ with col3:
     st.markdown("🔵 **Blue**: Recall Level")
     st.markdown("🟡 **Gold**: Understanding Level") 
     st.markdown("🟠 **Orange**: Apply Level")
+    
+    # Ollama status indicator
+    if st.session_state.ollama_status:
+        st.success("✅ Ollama Connected (Gemma3:1b)")
+    else:
+        st.error("❌ Ollama Not Connected")
+        st.info("Run `ollama run gemma3:1b` to enable AI features")
 
 # Footer
 st.markdown("---")

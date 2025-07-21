@@ -273,6 +273,65 @@ class DocumentProcessor:
         conn.close()
         return chunks
     
+    def delete_document(self, document_id: int) -> Dict:
+        """Delete a document and all its associated data"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get document info before deletion
+            cursor.execute("SELECT filename, file_path, vector_path FROM documents WHERE id = ?", (document_id,))
+            doc_info = cursor.fetchone()
+            
+            if not doc_info:
+                conn.close()
+                return {
+                    "success": False,
+                    "message": f"Document with ID {document_id} not found"
+                }
+            
+            filename, file_path, vector_path = doc_info
+            
+            # Delete chunks first (foreign key constraint)
+            cursor.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+            
+            # Delete document record
+            cursor.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+            
+            conn.commit()
+            conn.close()
+            
+            # Delete physical files
+            deleted_files = []
+            
+            # Delete the main file
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    deleted_files.append("main file")
+                except Exception as e:
+                    print(f"Error deleting main file {file_path}: {e}")
+            
+            # Delete the vector file
+            if vector_path and os.path.exists(vector_path):
+                try:
+                    os.remove(vector_path)
+                    deleted_files.append("vector file")
+                except Exception as e:
+                    print(f"Error deleting vector file {vector_path}: {e}")
+            
+            return {
+                "success": True,
+                "message": f"Successfully deleted '{filename}' and {', '.join(deleted_files)}",
+                "filename": filename
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error deleting document: {str(e)}"
+            }
+    
     def search_documents(self, query: str, top_k: int = 5) -> List[Dict]:
         """Search documents using vector similarity"""
         # Encode query
