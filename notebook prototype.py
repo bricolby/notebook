@@ -3,6 +3,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from streamlit_ace import st_ace
 import json
+from document_processor import DocumentProcessor
+import time
 
 # Page configuration
 st.set_page_config(
@@ -153,6 +155,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Initialize document processor
+if 'document_processor' not in st.session_state:
+    st.session_state.document_processor = DocumentProcessor()
+
 # Initialize session state
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
@@ -170,6 +176,8 @@ if 'documents' not in st.session_state:
     st.session_state.documents = []
 if 'concepts' not in st.session_state:
     st.session_state.concepts = []
+if 'upload_status' not in st.session_state:
+    st.session_state.upload_status = []
 
 # Sample concepts data
 sample_concepts = [
@@ -252,27 +260,93 @@ with col1:
             help="Upload documents to study"
         )
         
+        # Process uploaded files
         if uploaded_files:
-            for file in uploaded_files:
-                st.write(f"📄 {file.name}")
-                st.session_state.documents.append(file.name)
+            for uploaded_file in uploaded_files:
+                with st.spinner(f"Processing {uploaded_file.name}..."):
+                    result = st.session_state.document_processor.process_document(uploaded_file, uploaded_file.name)
+                    
+                    if result["success"]:
+                        if result["status"] == "already_exists":
+                            st.success(f"✅ {result['message']}")
+                        else:
+                            st.success(f"✅ {result['message']}")
+                            st.session_state.upload_status.append({
+                                "filename": uploaded_file.name,
+                                "status": "success",
+                                "message": result["message"],
+                                "chunk_count": result.get("chunk_count", 0)
+                            })
+                    else:
+                        st.error(f"❌ {result['message']}")
+                        st.session_state.upload_status.append({
+                            "filename": uploaded_file.name,
+                            "status": "error",
+                            "message": result["message"]
+                        })
         
-        # Sample documents for demo
-        if not st.session_state.documents:
-            st.info("No documents uploaded yet. Sample documents shown below:")
-            sample_docs = ["Machine Learning Basics.pdf", "Deep Learning Notes.txt", "AI Fundamentals.md"]
-            for doc in sample_docs:
-                st.write(f"📄 {doc}")
+        # Display uploaded documents
+        st.markdown("### 📚 Uploaded Documents")
+        
+        # Get documents from database
+        documents = st.session_state.document_processor.get_documents()
+        
+        if documents:
+            for doc in documents:
+                with st.expander(f"📄 {doc['filename']}", expanded=False):
+                    col_info, col_actions = st.columns([3, 1])
+                    
+                    with col_info:
+                        st.write(f"**Size:** {doc['file_size']:,} bytes")
+                        st.write(f"**Chunks:** {doc['chunk_count']}")
+                        st.write(f"**Status:** {doc['status']}")
+                        st.write(f"**Uploaded:** {doc['upload_date']}")
+                    
+                    with col_actions:
+                        if st.button("🗑️", key=f"delete_{doc['id']}", help="Delete document"):
+                            # TODO: Implement delete functionality
+                            st.info("Delete functionality coming soon!")
+                        
+                        if st.button("👁️", key=f"view_{doc['id']}", help="View chunks"):
+                            chunks = st.session_state.document_processor.get_document_chunks(doc['id'])
+                            st.write(f"**Document has {len(chunks)} chunks:**")
+                            for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
+                                st.text_area(f"Chunk {chunk['index']}", chunk['text'][:200] + "...", height=100)
+                            if len(chunks) > 3:
+                                st.info(f"... and {len(chunks) - 3} more chunks")
+        else:
+            st.info("No documents uploaded yet. Upload some documents to get started!")
+        
+        # Display upload status history
+        if st.session_state.upload_status:
+            st.markdown("### 📊 Upload History")
+            for status in st.session_state.upload_status[-5:]:  # Show last 5
+                if status["status"] == "success":
+                    st.success(f"✅ {status['filename']} - {status['message']}")
+                else:
+                    st.error(f"❌ {status['filename']} - {status['message']}")
 
 # Middle Column - Chat Interface
 with col2:
     st.markdown('<div class="column-header">💬 Chat Interface</div>', unsafe_allow_html=True)
     
-    # Quiz mode toggle
-    col2a, col2b = st.columns([3, 1])
+    # Quiz mode toggle and search
+    col2a, col2b, col2c = st.columns([2, 1, 1])
     with col2a:
         user_input = st.text_input("Ask a question about your documents...", key="user_input")
     with col2b:
+        if st.button("🔍 Search", type="secondary"):
+            if user_input:
+                search_results = st.session_state.document_processor.search_documents(user_input, top_k=5)
+                if search_results:
+                    st.session_state.chat_history.append({"role": "user", "content": f"Search: {user_input}"})
+                    search_response = "**Search Results:**\n\n"
+                    for i, result in enumerate(search_results, 1):
+                        search_response += f"**{i}. From {result['document_name']} (similarity: {result['similarity']:.3f}):**\n"
+                        search_response += f"{result['chunk_text'][:200]}...\n\n"
+                    st.session_state.chat_history.append({"role": "assistant", "content": search_response})
+                    st.rerun()
+    with col2c:
         if st.button("🎯 Quiz Mode", type="primary"):
             st.session_state.quiz_mode = not st.session_state.quiz_mode
             if st.session_state.quiz_mode:
@@ -367,8 +441,17 @@ with col2:
     # Handle user input
     if user_input and st.button("Send"):
         st.session_state.chat_history.append({"role": "user", "content": user_input})
-        # Simulate AI response
-        ai_response = f"I understand you're asking about '{user_input}'. This is a simulated response based on your uploaded documents."
+        
+        # Search documents for relevant content
+        search_results = st.session_state.document_processor.search_documents(user_input, top_k=3)
+        
+        if search_results:
+            # Create response based on search results
+            context = "\n\n".join([f"From {result['document_name']}: {result['chunk_text'][:300]}..." for result in search_results])
+            ai_response = f"Based on your uploaded documents, here's what I found:\n\n{context}\n\nThis is a simulated response. In a full implementation, this would be processed by an AI model."
+        else:
+            ai_response = f"I don't have any relevant information in your uploaded documents about '{user_input}'. Try uploading some documents first!"
+        
         st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
         st.rerun()
 
