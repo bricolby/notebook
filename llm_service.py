@@ -23,11 +23,17 @@ class LLMService:
             if system_prompt:
                 payload["system"] = system_prompt
             
+            print(f"Making request to Ollama: {url}")
+            print(f"Model: {self.model_name}")
+            print(f"Payload keys: {list(payload.keys())}")
+            
             response = requests.post(url, json=payload, timeout=60)
             response.raise_for_status()
             
             result = response.json()
-            return result.get("response", "").strip()
+            response_text = result.get("response", "").strip()
+            print(f"Ollama response length: {len(response_text)}")
+            return response_text
             
         except requests.exceptions.RequestException as e:
             print(f"Error making request to Ollama: {e}")
@@ -132,60 +138,93 @@ Focus on key concepts and important details from the text. Make sure questions t
         return questions
     
     def extract_concepts(self, document_chunks: List[str]) -> List[Dict]:
-        """Extract main and sub concepts from document content"""
+        """Extract main concepts from document content"""
         if not document_chunks:
+            print("No document chunks provided for concept extraction")
             return []
+        
+        print(f"Extracting concepts from {len(document_chunks)} chunks")
         
         # Combine chunks for analysis
         context_text = "\n\n".join(document_chunks[:15])  # Use first 15 chunks
+        print(f"Combined context length: {len(context_text)} characters")
         
         system_prompt = """You are an expert at analyzing educational content and extracting key concepts. 
-        Identify the main concepts and their sub-concepts from the provided text.
+        Your task is to identify the main concepts from the provided text.
         
-        Format your response as JSON with this structure:
+        IMPORTANT: You must respond with ONLY valid JSON in this exact format:
         {
             "concepts": [
                 {
-                    "main": "Main Concept Name",
-                    "sub": "Sub-concept Name",
+                    "main": "Concept Name",
+                    "sub": "Concept Name", 
                     "description": "Brief description of the concept"
                 }
             ]
         }
         
-        Focus on educational concepts that could be used for learning assessment."""
+        Focus on identifying the key topics, themes, or subjects from the document.
+        Each concept should represent a distinct topic or theme.
         
-        prompt = f"""Analyze the following document content and extract the main concepts and sub-concepts:
+        Do not include any other text, explanations, or formatting. Only return the JSON."""
+        
+        prompt = f"""Here is the document content to analyze:
 
 {context_text}
 
-Identify the key educational concepts that could be used for learning and assessment:"""
+Extract the key concepts from this content. Respond with ONLY the JSON format as specified in the system prompt."""
 
+        print("Sending concept extraction request to Ollama...")
         response = self._make_request(prompt, system_prompt)
+        print(f"Received response: {response[:200]}...")
         
         try:
-            # Try to extract JSON from response
+            # First try to parse the entire response as JSON
+            try:
+                concept_data = json.loads(response.strip())
+                concepts = concept_data.get("concepts", [])
+                if concepts:
+                    print(f"Successfully extracted {len(concepts)} concepts from direct JSON")
+                    return concepts
+            except json.JSONDecodeError:
+                pass
+            
+            # If that fails, try to extract JSON from within the response
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
-                concept_data = json.loads(json_match.group())
-                return concept_data.get("concepts", [])
-            else:
-                # Fallback: create basic concepts
-                return self._create_fallback_concepts(document_chunks)
-        except json.JSONDecodeError:
+                try:
+                    concept_data = json.loads(json_match.group())
+                    concepts = concept_data.get("concepts", [])
+                    if concepts:
+                        print(f"Successfully extracted {len(concepts)} concepts from JSON match")
+                        return concepts
+                except json.JSONDecodeError as e:
+                    print(f"JSON decode error in match: {e}")
+            
+            print(f"No valid JSON found in response: {response[:200]}...")
+            print("Using fallback concepts")
+            # Fallback: create basic concepts
+            return self._create_fallback_concepts(document_chunks)
+            
+        except Exception as e:
+            print(f"Unexpected error in concept extraction: {e}")
             return self._create_fallback_concepts(document_chunks)
     
     def _create_fallback_concepts(self, chunks: List[str]) -> List[Dict]:
         """Create basic fallback concepts if LLM fails"""
         concepts = []
         if chunks:
-            # Create a simple concept based on the first chunk
-            first_chunk = chunks[0][:100]
-            concepts.append({
-                "main": "Document Content",
-                "sub": "Key Topics",
-                "description": f"Main topics from the document: {first_chunk}..."
-            })
+            # Create concepts from the first few chunks
+            for i, chunk in enumerate(chunks[:8]):  # Use first 8 chunks
+                # Extract first few words as concept name
+                words = chunk.split()[:6]
+                concept_name = " ".join(words) if words else f"Topic {i+1}"
+                
+                concepts.append({
+                    "main": concept_name[:50] + "..." if len(concept_name) > 50 else concept_name,
+                    "sub": concept_name[:50] + "..." if len(concept_name) > 50 else concept_name,
+                    "description": f"Key topic from document: {chunk[:100]}..."
+                })
         return concepts
     
     def check_ollama_connection(self) -> bool:

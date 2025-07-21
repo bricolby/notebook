@@ -63,6 +63,29 @@ class DocumentProcessor:
             )
         ''')
         
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS concepts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER,
+                main_concept TEXT NOT NULL,
+                sub_concept TEXT NOT NULL,
+                description TEXT,
+                mastery_level INTEGER DEFAULT 0,
+                progress INTEGER DEFAULT 0,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE
+            )
+        ''')
+        
+        # Create migration tracking table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS migrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                migration_name TEXT UNIQUE NOT NULL,
+                applied_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         conn.commit()
         conn.close()
     
@@ -214,7 +237,8 @@ class DocumentProcessor:
                 "message": f"Successfully processed '{filename}' ({len(chunks)} chunks)",
                 "document_id": document_id,
                 "chunk_count": len(chunks),
-                "status": "processed"
+                "status": "processed",
+                "chunks": chunks  # Return chunks for concept extraction
             }
             
         except Exception as e:
@@ -294,6 +318,11 @@ class DocumentProcessor:
             
             # Delete chunks first (foreign key constraint)
             cursor.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+            chunks_deleted = cursor.rowcount
+            
+            # Delete concepts associated with this document
+            cursor.execute("DELETE FROM concepts WHERE document_id = ?", (document_id,))
+            concepts_deleted = cursor.rowcount
             
             # Delete document record
             cursor.execute("DELETE FROM documents WHERE id = ?", (document_id,))
@@ -322,8 +351,10 @@ class DocumentProcessor:
             
             return {
                 "success": True,
-                "message": f"Successfully deleted '{filename}' and {', '.join(deleted_files)}",
-                "filename": filename
+                "message": f"Successfully deleted '{filename}' ({chunks_deleted} chunks, {concepts_deleted} concepts) and {', '.join(deleted_files)}",
+                "filename": filename,
+                "chunks_deleted": chunks_deleted,
+                "concepts_deleted": concepts_deleted
             }
             
         except Exception as e:
@@ -331,6 +362,93 @@ class DocumentProcessor:
                 "success": False,
                 "message": f"Error deleting document: {str(e)}"
             }
+    
+    def extract_and_store_concepts(self, chunks: List[str], llm_service, document_id: int) -> List[Dict]:
+        """Extract concepts from chunks and store them in the database"""
+        try:
+            # Extract concepts using LLM
+            extracted_concepts = llm_service.extract_concepts(chunks)
+            
+            if not extracted_concepts:
+                return []
+            
+            # Store concepts in database
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            stored_concepts = []
+            for concept in extracted_concepts:
+                cursor.execute('''
+                    INSERT INTO concepts (document_id, main_concept, sub_concept, description)
+                    VALUES (?, ?, ?, ?)
+                ''', (document_id, concept["main"], concept["sub"], concept.get("description", "")))
+                
+                concept_id = cursor.lastrowid
+                stored_concepts.append({
+                    "id": concept_id,
+                    "document_id": document_id,
+                    "main": concept["main"],
+                    "sub": concept["sub"],
+                    "description": concept.get("description", ""),
+                    "mastery_level": 0,
+                    "progress": 0
+                })
+            
+            conn.commit()
+            conn.close()
+            
+            return stored_concepts
+            
+        except Exception as e:
+            print(f"Error extracting concepts: {e}")
+            return []
+    
+    def get_concepts(self) -> List[Dict]:
+        """Get all concepts from the database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, document_id, main_concept, sub_concept, description, mastery_level, progress
+            FROM concepts
+            WHERE document_id IS NOT NULL
+            ORDER BY main_concept, sub_concept
+        ''')
+        
+        concepts = []
+        for row in cursor.fetchall():
+            concepts.append({
+                'id': row[0],
+                'document_id': row[1],
+                'main': row[2],
+                'sub': row[3],
+                'description': row[4],
+                'mastery_level': row[5],
+                'progress': row[6]
+            })
+        
+        conn.close()
+        return concepts
+    
+    def update_concept_mastery(self, concept_id: int, mastery_level: int, progress: int) -> bool:
+        """Update mastery level and progress for a concept"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE concepts 
+                SET mastery_level = ?, progress = ?
+                WHERE id = ?
+            ''', (mastery_level, progress, concept_id))
+            
+            conn.commit()
+            conn.close()
+            return True
+            
+        except Exception as e:
+            print(f"Error updating concept mastery: {e}")
+            return False
     
     def search_documents(self, query: str, top_k: int = 5) -> List[Dict]:
         """Search documents using vector similarity"""
