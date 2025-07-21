@@ -3,8 +3,21 @@ import json
 from typing import List, Dict, Optional
 import re
 
+# Add this function to clean up trailing commas in JSON
+
+def clean_json_trailing_commas(json_str):
+    # Remove trailing commas in arrays and objects
+    json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+    return json_str
+
+# Add a function to strip prefixes from options
+
+def strip_option_prefix(option):
+    # Remove 'Option X:', 'A.', 'A)', 'A:', etc. from the start
+    return re.sub(r'^(Option [A-D]:|[A-D][\.|\)|:])\s*', '', option).strip()
+
 class LLMService:
-    def __init__(self, model_name: str = "gemma3:1b", base_url: str = "http://localhost:11434"):
+    def __init__(self, model_name: str = "gemma3:4b", base_url: str = "http://localhost:11434"):
         self.model_name = model_name
         self.base_url = base_url
         self.api_url = f"{base_url}/api"
@@ -68,92 +81,66 @@ Please provide a helpful answer based on the context above:"""
         return self._make_request(prompt, system_prompt)
     
     def generate_quiz_questions(self, document_chunks: List[str], mastery_level: int = 1, num_questions: int = 3) -> List[Dict]:
-        """Generate quiz questions based on document content and mastery level using Bloom's Taxonomy"""
+        """Generate quiz questions based on concept name only, using LLM knowledge, and force valid JSON output."""
         if not document_chunks:
             return []
         
-        # Combine chunks for context
-        context_text = "\n\n".join(document_chunks[:10])  # Use first 10 chunks
+        # Use the first chunk as the concept name (since we pass [f"Concept: {concept_name}"])
+        concept_name = document_chunks[0].replace("Concept:", "").strip()
         
-        # Define Bloom's Taxonomy levels
-        bloom_levels = {
-            1: {
-                "name": "Recall",
-                "description": "Remembering facts, terms, basic concepts",
-                "question_types": ["multiple_choice", "text"],
-                "focus": "factual recall, definitions, basic information"
-            },
-            2: {
-                "name": "Understanding", 
-                "description": "Comprehending meaning, interpreting, explaining",
-                "question_types": ["multiple_choice", "text"],
-                "focus": "comprehension, interpretation, explanation"
-            },
-            3: {
-                "name": "Apply",
-                "description": "Using knowledge in new situations, problem-solving",
-                "question_types": ["text"],
-                "focus": "application, problem-solving, real-world scenarios"
-            }
-        }
-        
-        level_info = bloom_levels.get(mastery_level, bloom_levels[1])
-        
-        system_prompt = f"""You are an expert educator creating quiz questions based on Bloom's Taxonomy. Generate {num_questions} questions at the {level_info['name']} level.
+        system_prompt = f"""
+You are an expert educator. Your job is to generate {num_questions} multiple choice quiz questions about the concept: \"{concept_name}\".
 
-BLOOM'S TAXONOMY GUIDELINES:
-- Level 1 (Recall): Focus on factual recall, definitions, basic information. Use multiple choice questions.
-- Level 2 (Understanding): Focus on comprehension, interpretation, explanation. Use multiple choice questions.
-- Level 3 (Apply): Focus on application, problem-solving, real-world scenarios. Use multiple choice questions.
+IMPORTANT INSTRUCTIONS:
+- DO NOT ask for or expect any document content.
+- Use your own knowledge of the concept.
+- ALWAYS output ONLY valid JSON in the exact format below. Do NOT include any extra text, markdown, or explanations.
+- The \"options\" array must be a list of 4 answer texts only (no prefixes, no letters, no numbers).
+- The \"correct_answer\" field is the FULL TEXT of the correct option (must match exactly one of the options).
+- The \"explanation\" field is a brief explanation of the correct answer.
 
-QUESTION TYPE GUIDELINES:
-- ALL questions should be multiple choice with exactly 4 clear options (A, B, C, D).
-- The "correct" field should be the index (0-3) of the correct option.
-- For Apply level, create scenarios that test application of concepts.
+EXAMPLE FORMAT (output ONLY this JSON, nothing else):
 
-IMPORTANT: For ALL questions, you MUST include:
-1. The "options" array with exactly 4 options
-2. The "correct" field with the index (0-3) of the correct answer
-3. The "correct_answer" field with the text of the correct option
-
-Format your response as JSON with this structure:
 {{
-    "questions": [
-        {{
-            "question": "Question text",
-            "type": "multiple_choice",
-            "options": ["Option A", "Option B", "Option C", "Option D"],
-            "correct": 0,
-            "correct_answer": "Option A",
-            "explanation": "Detailed explanation of why the answer is correct",
-            "bloom_level": "{level_info['name']}"
-        }}
-    ]
-}}"""
+  \"questions\": [
+    {{
+      \"question\": \"What is the capital of France?\",
+      \"type\": \"multiple_choice\",
+      \"options\": [\"Paris\", \"London\", \"Berlin\", \"Madrid\"],
+      \"correct\": 0,
+      \"correct_answer\": \"Paris\",
+      \"explanation\": \"Paris is the capital of France.\"
+    }}
+  ]
+}}
+"""
 
-        prompt = f"""Based on the following document content, generate {num_questions} multiple choice quiz questions at the {level_info['name']} level of Bloom's Taxonomy:
-
-{context_text}
-
-Focus on {level_info['focus']}. 
-- For Recall level: Focus on factual information, definitions, basic concepts
-- For Understanding level: Focus on comprehension, interpretation, explanation  
-- For Apply level: Focus on application, problem-solving, real-world scenarios
-
-IMPORTANT: ALL questions must be multiple choice with exactly 4 options."""
+        prompt = f"Concept: {concept_name}"
 
         response = self._make_request(prompt, system_prompt)
-        
         print(f"LLM Response for quiz generation: {response[:500]}...")
-        
         try:
             # Try to extract JSON from response
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 try:
-                    quiz_data = json.loads(json_match.group())
+                    # Clean up trailing commas before parsing
+                    cleaned_json = clean_json_trailing_commas(json_match.group())
+                    quiz_data = json.loads(cleaned_json)
                     questions = quiz_data.get("questions", [])
-                    
+                    # Strip prefixes from all options
+                    for q in questions:
+                        if "options" in q:
+                            q["options"] = [strip_option_prefix(opt) for opt in q["options"]]
+                        # Also fix correct_answer if it was a letter
+                        if "correct_answer" in q and q["correct_answer"] not in q["options"]:
+                            abcd = ["A", "B", "C", "D"]
+                            if q["correct_answer"].strip().upper() in abcd:
+                                idx = abcd.index(q["correct_answer"].strip().upper())
+                                if idx < len(q["options"]):
+                                    q["correct_answer"] = q["options"][idx]
+                                    q["correct"] = idx
+                    # ... rest of the function as before ...
                     print(f"Generated {len(questions)} questions")
                     for i, q in enumerate(questions):
                         print(f"Question {i+1}: type={q.get('type')}, has_options={q.get('options') is not None}, options_count={len(q.get('options', []))}")
@@ -162,74 +149,6 @@ IMPORTANT: ALL questions must be multiple choice with exactly 4 options."""
                         print(f"  Correct: {q.get('correct', 'No correct')}")
                         print(f"  Correct answer: {q.get('correct_answer', 'No correct answer')}")
                         print("---")
-                    
-                    # Add evaluation criteria for Apply level questions
-                    for question in questions:
-                        if question.get("type") == "text" and mastery_level == 3:
-                            question["evaluation_criteria"] = question.get("evaluation_criteria", 
-                                "Evaluate based on understanding and application of concepts, not exact word matches")
-                        
-                        # Validate multiple choice questions
-                        if question.get("type") in ["multiple_choice", "recall"]:
-                            print(f"\nVALIDATING QUESTION: {question.get('question', 'No question')}")
-                            print(f"  Original type: {question.get('type')}")
-                            print(f"  Original correct: {question.get('correct')}")
-                            print(f"  Original correct_answer: {question.get('correct_answer')}")
-                            print(f"  Original options: {question.get('options')}")
-                            
-                            # Convert "recall" to "multiple_choice" for consistency
-                            if question.get("type") == "recall":
-                                question["type"] = "multiple_choice"
-                                print(f"  Converted type to: {question.get('type')}")
-                            
-                            # Ensure options exist and have exactly 4 options
-                            if "options" not in question or len(question["options"]) != 4:
-                                print(f"Fixing multiple choice question: missing or invalid options")
-                                # Generate fallback options
-                                question["options"] = [
-                                    "Option A",
-                                    "Option B", 
-                                    "Option C",
-                                    "Option D"
-                                ]
-                            
-                            # Ensure correct index is valid
-                            if "correct" not in question or question["correct"] >= len(question["options"]):
-                                question["correct"] = 0
-                                print(f"  Fixed correct index to: {question['correct']}")
-                            
-                            # Ensure correct_answer exists and matches the correct index
-                            if "correct_answer" not in question:
-                                question["correct_answer"] = question["options"][question["correct"]]
-                                print(f"  Set correct_answer to: {question['correct_answer']}")
-                            else:
-                                # Verify that correct_answer matches the option at the correct index
-                                correct_index = question.get("correct", 0)
-                                if correct_index < len(question["options"]):
-                                    expected_answer = question["options"][correct_index]
-                                    if question["correct_answer"] != expected_answer:
-                                        print(f"Fixing correct answer mismatch: expected '{expected_answer}', got '{question['correct_answer']}'")
-                                        question["correct_answer"] = expected_answer
-                                
-                                # Also try to find the correct index by matching the correct_answer text
-                                correct_answer_text = question.get("correct_answer", "")
-                                for i, option in enumerate(question["options"]):
-                                    if option.strip().lower() == correct_answer_text.strip().lower():
-                                        if question.get("correct") != i:
-                                            print(f"Fixing correct index: found '{correct_answer_text}' at index {i}, was {question.get('correct')}")
-                                            question["correct"] = i
-                                        break
-                            
-                            # Ensure explanation exists
-                            if "explanation" not in question:
-                                question["explanation"] = f"This is the correct answer because it matches the expected response."
-                            
-                            print(f"  FINAL - Type: {question.get('type')}")
-                            print(f"  FINAL - Correct: {question.get('correct')}")
-                            print(f"  FINAL - Correct Answer: {question.get('correct_answer')}")
-                            print(f"  FINAL - Options: {question.get('options')}")
-                            print("---")
-                    
                     return questions
                 except json.JSONDecodeError as e:
                     print(f"JSON decode error in extracted JSON: {e}")
@@ -237,7 +156,6 @@ IMPORTANT: ALL questions must be multiple choice with exactly 4 options."""
                     return self._create_fallback_questions(document_chunks, num_questions, mastery_level)
             else:
                 print("No JSON found in response, using fallback questions")
-                # Fallback: create simple questions
                 return self._create_fallback_questions(document_chunks, num_questions, mastery_level)
         except json.JSONDecodeError as e:
             print(f"JSON decode error: {e}")
